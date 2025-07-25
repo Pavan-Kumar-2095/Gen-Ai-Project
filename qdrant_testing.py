@@ -1,10 +1,16 @@
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance , VectorParams
 from sentence_transformers import SentenceTransformer
+from dotenv import load_dotenv
+import os
 
-QDRANT_URL = "https://7df02a24-c7fb-4745-b1b8-c9502f67d43e.us-west-1-0.aws.cloud.qdrant.io:6333"
 
-API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.JnZRLS0_qgAKgHp732Uy64yMf3Vwucsd0_aA7uskUd0"
+
+load_dotenv()
+
+QDRANT_URL = os.getenv("QDRANT_URL")
+API_KEY = os.getenv("QDRANT_API_KEY")
+
 
 client  = QdrantClient(
     url = QDRANT_URL,
