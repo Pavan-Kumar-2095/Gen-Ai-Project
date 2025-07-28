@@ -26,6 +26,7 @@ app = FastAPI()
 # 🔐 API key for Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BEARER = os.getenv("BEARER_KEY")
+port = int(os.getenv("PORT", 8000))
 
 # Initialize model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -243,7 +244,7 @@ app.include_router(api_router)
 
 
 if __name__ == "__main__":
-    uvicorn.run("Server:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    uvicorn.run("Server:app", host="0.0.0.0", port=port)
 
 
 
