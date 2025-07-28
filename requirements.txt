@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+sentence-transformers
+python-dotenv
+aiohttp
+pydantic
+langchain
+faiss-cpu
+numpy
+requests
+PyMuPDF
+mammoth
