@@ -6,7 +6,7 @@ import tempfile
 import time
 import uvicorn
 import requests
-from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModel
 import uuid
 from dotenv import load_dotenv
 import aiohttp
@@ -29,7 +29,10 @@ BEARER = os.getenv("BEARER_KEY")
 
 # Initialize clients
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, timeout=600)
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+model_name = "sentence-transformers/paraphrase-MiniLM-L6-v2"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+embedding_model = AutoModel.from_pretrained(model_name)
 
 class DocumentRequest(BaseModel):
     documents: Optional[str] = None
