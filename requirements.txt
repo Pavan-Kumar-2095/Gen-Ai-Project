@@ -4,7 +4,6 @@ sentence-transformers
 python-dotenv
 aiohttp
 pydantic
-langchain
 qdrant_client
 numpy
 requests

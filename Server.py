@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 import aiohttp
 from pydantic import BaseModel
 import asyncio
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 import re
 import numpy as np
 import math
@@ -56,13 +55,15 @@ class DocumentRequest(BaseModel):
     documents: Optional[str] = None
     questions: Optional[List[str]] = None
 
-def chunk_text(text: str):
-    splitter = RecursiveCharacterTextSplitter(
-        separators=['\n\n', '\n', '.', ','],
-        chunk_size=1500,
-        chunk_overlap=400
-    )
-    return splitter.split_text(text)
+def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400) -> list[str]:
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - chunk_overlap
+    return chunks
+
 
 async def get_embeddings(text_list):
     return embedding_model.encode(text_list, convert_to_numpy=True).tolist()
