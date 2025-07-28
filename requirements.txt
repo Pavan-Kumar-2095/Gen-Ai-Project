@@ -5,7 +5,7 @@ python-dotenv
 aiohttp
 pydantic
 langchain
-faiss-cpu
+qdrant_client
 numpy
 requests
 PyMuPDF

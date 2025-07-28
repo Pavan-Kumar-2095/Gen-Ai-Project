@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, Header , APIRouter
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, Header, APIRouter
 from fastapi.responses import JSONResponse
 from typing import Optional, List
 import os
@@ -14,10 +14,10 @@ from pydantic import BaseModel
 import asyncio
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import re
-import faiss
 import numpy as np
-import threading
 import math
+import qdrant_client
+from qdrant_client.http import models as qdrant_models
 
 load_dotenv()
 
@@ -26,15 +26,31 @@ app = FastAPI()
 # 🔐 API key for Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BEARER = os.getenv("BEARER_KEY")
-PORT = int(os.getenv("PORT", 8000))
+port = int(os.getenv("PORT", 8000))
+
+# Qdrant setup
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # If needed
+QDRANT_COLLECTION = "documents"
+
+qdrant = qdrant_client.QdrantClient(
+    url=QDRANT_URL,
+    api_key=QDRANT_API_KEY,
+    prefer_grpc=False
+)
+
+# Create collection if not exists
+if QDRANT_COLLECTION not in [col.name for col in qdrant.get_collections().collections]:
+    qdrant.recreate_collection(
+        collection_name=QDRANT_COLLECTION,
+        vectors_config=qdrant_models.VectorParams(
+            size=384,  # embedding dim of all-MiniLM-L6-v2
+            distance=qdrant_models.Distance.COSINE
+        )
+    )
 
 # Initialize model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-# Globals for FAISS
-faiss_index = None
-faiss_chunks = []
-faiss_lock = threading.Lock()
 
 class DocumentRequest(BaseModel):
     documents: Optional[str] = None
@@ -51,32 +67,41 @@ def chunk_text(text: str):
 async def get_embeddings(text_list):
     return embedding_model.encode(text_list, convert_to_numpy=True).tolist()
 
-async def upload_to_faiss(embeddings, chunks):
-    global faiss_index, faiss_chunks
-    with faiss_lock:
-        dim = len(embeddings[0])
-        faiss_index = faiss.IndexFlatIP(dim)  # cosine sim with inner product
-        embedding_array = np.array(embeddings).astype('float32')
-        faiss.normalize_L2(embedding_array)
-        faiss_index.add(embedding_array)
-        faiss_chunks = chunks.copy()
-        print(f"[✓] FAISS index built with {len(faiss_chunks)} chunks")
+async def upload_to_qdrant(embeddings, chunks, batch_size=200):
+    points = []
+    for i, (embedding, chunk) in enumerate(zip(embeddings, chunks)):
+        point = qdrant_models.PointStruct(
+            id=str(uuid.uuid4()),
+            vector=embedding,
+            payload={"text": chunk}
+        )
+        points.append(point)
 
-async def search_faiss(vector, top_k=5):
-    global faiss_index, faiss_chunks
-    with faiss_lock:
-        if faiss_index is None or len(faiss_chunks) == 0:
-            return []
-        query_vec = np.array([vector]).astype('float32')
-        faiss.normalize_L2(query_vec)
-        distances, indices = faiss_index.search(query_vec, top_k)
-        results = []
-        for dist, idx in zip(distances[0], indices[0]):
-            if idx < len(faiss_chunks):
-                results.append({"chunk": faiss_chunks[idx], "score": float(dist)})
-        return results
+        if len(points) >= batch_size:
+            qdrant.upsert(collection_name=QDRANT_COLLECTION, points=points)
+            points.clear()
 
-async def query_gemini(prompt):
+    # Upload remaining points
+    if points:
+        qdrant.upsert(collection_name=QDRANT_COLLECTION, points=points)
+    print(f"[✓] Uploaded {len(chunks)} chunks to Qdrant in batches of {batch_size}")
+
+async def search_qdrant(vector, top_k=5):
+    search_result = qdrant.search(
+        collection_name=QDRANT_COLLECTION,
+        query_vector=vector,
+        limit=top_k,
+        with_payload=True
+    )
+    results = []
+    for hit in search_result:
+        chunk_text = hit.payload.get("text", "")
+        results.append({"chunk": chunk_text, "score": hit.score})
+    return results
+
+# Helper functions (query_gemini, build_prompt, parse_answers, join_all_lines, choose_batch_size)
+
+async def query_gemini(prompt: str) -> str:
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     response = requests.post(endpoint, json=payload)
@@ -110,7 +135,6 @@ def parse_answers(response: str, num_questions: int) -> list[str]:
 def join_all_lines(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
-
 def choose_batch_size(num_questions: int) -> int:
     if num_questions <= 40:
         return 50
@@ -123,20 +147,17 @@ def choose_batch_size(num_questions: int) -> int:
     elif num_questions <= 150:
         percentage = 0.75
     else:
-        percentage = 0.80  # increased for >150
-
+        percentage = 0.80
     batch_size = math.ceil(num_questions * percentage)
-    return min(batch_size, 1000)  # optional max limit for safety
+    return min(batch_size, 1000)
+
+# Root endpoint
+@app.get("/")
+def root():
+    return {"message": "***** Qdrant-based FastAPI server running *****"}
 
 # Create a router with prefix /api/v1
 api_router = APIRouter(prefix="/api/v1")
-
-
-@app.get("/")
-def root():
-    return {"message": "***** FAISS-only FastAPI server running *****"}
-
-
 
 @api_router.post("/hackrx/run")
 async def process_doc(
@@ -205,21 +226,20 @@ async def process_doc(
             get_embeddings(questions)
         )
         end_embedd = time.perf_counter()
-        # Only upload to FAISS
-        await upload_to_faiss(embeddings, chunks)
+
+        # Upload chunks + embeddings to Qdrant in batches of 200
+        await upload_to_qdrant(embeddings, chunks, batch_size=200)
 
         # Process questions
         answers = []
         batch_size_questions = choose_batch_size(len(questions))
-        
-
 
         for i in range(0, len(questions), batch_size_questions):
             batch_questions = questions[i:i + batch_size_questions]
             batch_embeddings = query_embeddings[i:i + batch_size_questions]
             contexts = []
             for embedding in batch_embeddings:
-                top_chunks = await search_faiss(embedding, top_k=3)
+                top_chunks = await search_qdrant(embedding, top_k=3)
                 context = join_all_lines("\n".join([c['chunk'] for c in top_chunks]))
                 contexts.append(context)
 
@@ -229,8 +249,8 @@ async def process_doc(
             answers.extend(batch_answers)
 
         end = time.perf_counter()
-        
-        print("embedding time" , end_embedd - start_embedd)
+
+        print("embedding time", end_embedd - start_embedd)
         print(f"total query Processing time: {end - end_embedd:.2f} seconds")
         print(f"total Processing time: {end - start:.2f} seconds")
         print(GEMINI_API_KEY[-2:])
@@ -238,14 +258,10 @@ async def process_doc(
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
-    
+
 app.include_router(api_router)
 
-
-
 if __name__ == "__main__":
-    uvicorn.run("Server:app", host="0.0.0.0", PORT=PORT)
-
-
+    uvicorn.run("test:app", host="0.0.0.0", port=port)
 
 
