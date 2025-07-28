@@ -1,6 +1,5 @@
 fastapi
 uvicorn[standard]
-sentence-transformers
 python-dotenv
 aiohttp
 pydantic
@@ -8,4 +7,4 @@ qdrant_client
 numpy
 requests
 PyMuPDF
-mammoth
+mammoth   
