@@ -232,6 +232,7 @@ async def process_doc(
         print("embedding time" , end_embedd - start_embedd)
         print(f"total query Processing time: {end - end_embedd:.2f} seconds")
         print(f"total Processing time: {end - start:.2f} seconds")
+        print(GEMINI_API_KEY[-2:])
         return {"answers": answers}
 
     except Exception as e:
