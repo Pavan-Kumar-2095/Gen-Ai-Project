@@ -1,7 +1,7 @@
 fastapi==0.110.1
 uvicorn==0.29.0
 transformers==4.40.1
-torch==2.1.2  # Optional, required if model needs it
+torch==2.5.0 # Optional, required if model needs it
 python-dotenv==1.0.1
 aiohttp==3.9.5
 pydantic==1.10.14
