@@ -4,7 +4,6 @@ sentence-transformers
 python-dotenv
 aiohttp
 pydantic
-langchain
 faiss-cpu
 numpy
 requests
