@@ -11,29 +11,25 @@ import uuid
 from dotenv import load_dotenv
 import aiohttp
 from pydantic import BaseModel
-import asyncio
 import re
-import faiss
 import numpy as np
-import threading
 import math
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
 load_dotenv()
 
 app = FastAPI()
 
-# 🔐 API key for Gemini
+# 🔐 API keys and config
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BEARER = os.getenv("BEARER_KEY")
-port = int(os.getenv("PORT", 8000))
 
-# Initialize model
+# Initialize clients
+client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, timeout=600)
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-# Globals for FAISS
-faiss_index = None
-faiss_chunks = []
-faiss_lock = threading.Lock()
 
 class DocumentRequest(BaseModel):
     documents: Optional[str] = None
@@ -52,44 +48,57 @@ def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400):
 
     return chunks
 
-
 async def get_embeddings(text_list):
     return embedding_model.encode(text_list, convert_to_numpy=True).tolist()
 
-async def upload_to_faiss(embeddings, chunks):
-    global faiss_index, faiss_chunks
-    with faiss_lock:
-        dim = len(embeddings[0])
-        faiss_index = faiss.IndexFlatIP(dim)  # cosine sim with inner product
-        embedding_array = np.array(embeddings).astype('float32')
-        faiss.normalize_L2(embedding_array)
-        faiss_index.add(embedding_array)
-        faiss_chunks = chunks.copy()
-        print(f"[✓] FAISS index built with {len(faiss_chunks)} chunks")
+def chunked(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
-async def search_faiss(vector, top_k=5):
-    global faiss_index, faiss_chunks
-    with faiss_lock:
-        if faiss_index is None or len(faiss_chunks) == 0:
-            return []
-        query_vec = np.array([vector]).astype('float32')
-        faiss.normalize_L2(query_vec)
-        distances, indices = faiss_index.search(query_vec, top_k)
-        results = []
-        for dist, idx in zip(distances[0], indices[0]):
-            if idx < len(faiss_chunks):
-                results.append({"chunk": faiss_chunks[idx], "score": float(dist)})
-        return results
+batch_size = 100
+collection_name = "documents"
+
+async def upload_to_qdrant(embeddings, chunks):
+    if not client.collection_exists(collection_name):
+        print(f"[+] Creating collection '{collection_name}'")
+        vector_size = len(embeddings[0])
+        client.recreate_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+        )
+
+    points = [
+        PointStruct(
+            id=str(uuid.uuid4()),
+            vector=embedding,
+            payload={"chunk": chunks[i]}
+        )
+        for i, embedding in enumerate(embeddings)
+    ]
+
+    print(f"[↑] Uploading {len(points)} points for documents")
+    for batch in chunked(points, batch_size):
+        client.upsert(collection_name=collection_name, points=batch)
+    print(f"[✓] Done uploading to '{collection_name}'")
+
+async def search_qdrant(collection: str, vector, top_k=5):
+    search_result = client.search(
+        collection_name=collection,
+        query_vector=vector,
+        limit=top_k
+    )
+    return [{"chunk": r.payload["chunk"], "score": r.score} for r in search_result]
 
 async def query_gemini(prompt):
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
     response = requests.post(endpoint, json=payload)
     if response.ok:
         return response.json()['candidates'][0]['content']['parts'][0]['text']
     else:
         return f"Gemini API failed: {response.status_code} - {response.text}"
-
+    
 def build_prompt(questions: list[str], contexts: list[str]) -> str:
     answers_header = "\n".join([f"Answer {i + 1}: <your answer to Q{i + 1}>" for i in range(len(questions))])
     documents_questions = ""
@@ -141,8 +150,6 @@ api_router = APIRouter(prefix="/api/v1")
 def root():
     return {"message": "***** FAISS-only FastAPI server running *****"}
 
-
-
 @api_router.post("/hackrx/run")
 async def process_doc(
     body: DocumentRequest = Body(...),
@@ -176,7 +183,7 @@ async def process_doc(
             text = "\n".join([page.get_text() for page in doc])
         elif ext == "docx":
             import mammoth
-            result = mammoth.extract_raw_text({'path': tmp_path})
+            result = mammoth.extract_raw_text(tmp_path)
             text = result.value
         elif ext == "eml":
             import email
@@ -205,51 +212,45 @@ async def process_doc(
 
         start_embedd = time.perf_counter()
 
-        embeddings, query_embeddings = await asyncio.gather(
-            get_embeddings(chunks),
-            get_embeddings(questions)
-        )
+        embeddings = await get_embeddings(chunks)
+        query_embeddings = await get_embeddings(questions) if questions else []
+
         end_embedd = time.perf_counter()
-        # Only upload to FAISS
-        await upload_to_faiss(embeddings, chunks)
 
-        # Process questions
+        # Upload to Qdrant (not FAISS)
+        await upload_to_qdrant(embeddings, chunks)
+
+        # Process questions in batches
         answers = []
-        batch_size_questions = choose_batch_size(len(questions))
-        
+        if questions:
+            batch_size_questions = choose_batch_size(len(questions))
 
+            for i in range(0, len(questions), batch_size_questions):
+                batch_questions = questions[i:i + batch_size_questions]
+                batch_embeddings = query_embeddings[i:i + batch_size_questions]
+                contexts = []
+                for embedding in batch_embeddings:
+                    top_chunks = await search_qdrant(collection_name, embedding, top_k=3)
+                    context = join_all_lines("\n".join([c['chunk'] for c in top_chunks]))
+                    contexts.append(context)
 
-        for i in range(0, len(questions), batch_size_questions):
-            batch_questions = questions[i:i + batch_size_questions]
-            batch_embeddings = query_embeddings[i:i + batch_size_questions]
-            contexts = []
-            for embedding in batch_embeddings:
-                top_chunks = await search_faiss(embedding, top_k=3)
-                context = join_all_lines("\n".join([c['chunk'] for c in top_chunks]))
-                contexts.append(context)
-
-            prompt = build_prompt(batch_questions, contexts)
-            response = await query_gemini(prompt)
-            batch_answers = parse_answers(response, len(batch_questions))
-            answers.extend(batch_answers)
+                prompt = build_prompt(batch_questions, contexts)
+                response = await query_gemini(prompt)
+                batch_answers = parse_answers(response, len(batch_questions))
+                answers.extend(batch_answers)
 
         end = time.perf_counter()
-        
-        print("embedding time" , end_embedd - start_embedd)
-        print(f"total query Processing time: {end - end_embedd:.2f} seconds")
-        print(f"total Processing time: {end - start:.2f} seconds")
-        print(GEMINI_API_KEY[-2:])
+
+        print("embedding time:", end_embedd - start_embedd)
+        print(f"total query processing time: {end - end_embedd:.2f} seconds")
+        print(f"total processing time: {end - start:.2f} seconds")
+        if GEMINI_API_KEY:
+            print(f"GEMINI API key ends with: {GEMINI_API_KEY[-2:]}")
+
         return {"answers": answers}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
-    
-app.include_router(api_router)
-
-
-
-if __name__ == "__main__":
-    uvicorn.run("Server:app", host="0.0.0.0", port=port)
 
 
 

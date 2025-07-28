@@ -4,7 +4,6 @@ sentence-transformers
 python-dotenv
 aiohttp
 pydantic
-faiss-cpu
 numpy
 requests
 PyMuPDF
