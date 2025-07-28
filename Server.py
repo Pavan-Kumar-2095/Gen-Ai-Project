@@ -12,38 +12,35 @@ import aiohttp
 from pydantic import BaseModel
 import re
 import math
+
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import PointStruct, VectorParams, Distance
+from qdrant_client.models import Document
 
-# Load env variables
+# ------------------ Environment & Config ------------------
+
 load_dotenv()
 
-# Setup FastAPI
 app = FastAPI()
 api_router = APIRouter(prefix="/api/v1")
 
-# Auth & API keys
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BEARER = os.getenv("BEARER_KEY")
 PORT = int(os.getenv("PORT", 8000))
-
-# Qdrant setup
 QDRANT_URL = os.getenv("QDRANT_URL")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # Optional for cloud
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION = "documents"
 
-qdrant = QdrantClient(
-    url=QDRANT_URL,
-    api_key=QDRANT_API_KEY,
-    prefer_grpc=False
-)
+# You can switch to ":memory:" or local host depending on your use
+qdrant = QdrantClient(":memory:")
 
-# --------------------- Models ---------------------
+# ------------------ Request Models ------------------
+
 class DocumentRequest(BaseModel):
     documents: Optional[str] = None
     questions: Optional[List[str]] = None
 
-# ------------------ Utilities ---------------------
+# ------------------ Utilities ------------------
 
 def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400) -> list[str]:
     chunks = []
@@ -55,30 +52,40 @@ def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400) -> l
     return chunks
 
 def upload_chunks_with_qdrant(collection_name: str, texts: list[str]):
+    model_name = "BAAI/bge-small-en"
+
     qdrant.recreate_collection(
         collection_name=collection_name,
-        vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+        vectors_config=VectorParams(
+            size=qdrant.get_embedding_size(model_name),
+            distance=Distance.COSINE
+        )
     )
-    points = [
-        PointStruct(id=str(uuid.uuid4()), payload={"text": text}, vector=None)
-        for text in texts
-    ]
-    qdrant.upload_points(
-        collection_name=collection_name,
-        points=points,
-        batch_size=64,
-        embedding_model="text2vec-openai"
-    )
-    print(f"[✓] Uploaded {len(texts)} chunks using Qdrant's built-in embeddings")
 
-def search_qdrant(collection_name: str, query: str, top_k: int = 5):
-    results = qdrant.search(
+    documents = [Document(text=chunk, model=model_name) for chunk in texts]
+    payloads = [{"text": chunk} for chunk in texts]
+    ids = [str(uuid.uuid4()) for _ in texts]
+
+    try:
+        qdrant.upload_collection(
+            collection_name=collection_name,
+            vectors=documents,
+            payload=payloads,
+            ids=ids
+        )
+        print(f"[✓] Uploaded {len(texts)} chunks using FastEmbed ({model_name})")
+    except Exception as e:
+        print("[!] Upload failed after retries:", str(e))
+        raise
+
+def search_qdrant(collection_name: str, query: str, top_k: int = 7) -> list[str]:
+    model_name = "BAAI/bge-small-en"
+    result = qdrant.query_points(
         collection_name=collection_name,
-        query_text=query,
-        top=top_k,
-        embedding_model="text2vec-openai"
+        query=Document(text=query, model=model_name),
+        limit=top_k
     )
-    return [hit.payload["text"] for hit in results if "text" in hit.payload]
+    return [point.payload.get("text", "") for point in result.points]
 
 async def query_gemini(prompt: str) -> str:
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -89,27 +96,39 @@ async def query_gemini(prompt: str) -> str:
     else:
         return f"Gemini API failed: {response.status_code} - {response.text}"
 
-def build_prompt(questions: list[str], contexts: list[str]) -> str:
-    answers_header = "\n".join([f"Answer {i + 1}: <your answer to Q{i + 1}>" for i in range(len(questions))])
-    documents_questions = ""
-    for i, (context, question) in enumerate(zip(contexts, questions)):
-        documents_questions += f"\nDocument {i + 1}:\n{context}\n\nQ{i + 1}: {question}\n\n---"
-    prompt = (
-        f"Answer the following questions using only their respective Document. "
-        f"Keep each answer to one concise sentence. Respond in **this exact format**:\n\n"
-        f"{answers_header}\n\n{documents_questions.strip()}"
-    )
-    return prompt
+import re
+from typing import List
 
-def parse_answers(response: str, num_questions: int) -> list[str]:
-    pattern = r"Answer\s+(\d+):\s*(.*?)(?=\s*Answer\s+\d+:|$)"
+def parse_answers(response: str, num_questions: int) -> List[str]:
+    print("Raw response:", response)  # debug print
+    pattern = r"Answer\s*(\d+)\s*:\s*(.*?)(?=\s*Answer\s*\d+\s*:|$)"
     matches = re.findall(pattern, response, re.DOTALL | re.IGNORECASE)
+    print("Matches found:", matches)  # debug print
+    
     answers = ["The document "] * num_questions
     for match in matches:
         idx, ans = int(match[0]) - 1, match[1].strip()
         if 0 <= idx < num_questions and ans:
             answers[idx] = ans
     return answers
+
+
+
+def build_prompt(questions: List[str], contexts: List[str]) -> str:
+    answers_header = "\n".join([f"Answer {i + 1}: <your answer to Q{i + 1}>" for i in range(len(questions))])
+    documents_questions = ""
+    for i, (context, question) in enumerate(zip(contexts, questions)):
+        documents_questions += f"\nDocument {i + 1}:\n{context}\n\nQ{i + 1}: {question}\n\n---"
+    prompt = (
+        f"Answer the following questions using only their respective Document.\n\n"
+        f"Keep each answer to one concise sentence.\n"
+        f"Respond **only** in the exact format below, without adding anything else:\n\n"
+        f"{answers_header}\n\n"
+        f"{documents_questions.strip()}"
+    )
+    return prompt
+
+
 
 def join_all_lines(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
@@ -129,7 +148,7 @@ def choose_batch_size(num_questions: int) -> int:
         percentage = 0.80
     return min(math.ceil(num_questions * percentage), 1000)
 
-# ------------------- FastAPI Routes --------------------
+# ------------------ Routes ------------------
 
 @app.get("/")
 def root():
@@ -161,7 +180,7 @@ async def process_doc(
             tmp.write(contents)
             tmp_path = tmp.name
 
-        # Extract text
+        # Extract text based on format
         if ext == "pdf":
             import fitz
             doc = fitz.open(tmp_path)
@@ -185,8 +204,11 @@ async def process_doc(
                 else:
                     parts.append(msg.get_content())
                 text = "\n".join(parts)
+        elif ext == "txt":
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                text = f.read()
         else:
-            raise HTTPException(status_code=400, detail="Only .pdf, .docx or .eml files are supported.")
+            raise HTTPException(status_code=400, detail="Only .pdf, .docx, .txt, or .eml files are supported.")
 
         if not text.strip():
             raise HTTPException(status_code=400, detail="Document contains no extractable text.")
@@ -194,17 +216,16 @@ async def process_doc(
         # Chunk and upload
         chunks = chunk_text(text)
         questions = body.questions or []
-
         upload_chunks_with_qdrant(QDRANT_COLLECTION, chunks)
 
-        # Question answering
+        # Run QA loop
         answers = []
         batch_size_questions = choose_batch_size(len(questions))
         for i in range(0, len(questions), batch_size_questions):
             batch_questions = questions[i:i + batch_size_questions]
             contexts = []
             for question in batch_questions:
-                top_chunks = search_qdrant(QDRANT_COLLECTION, question, top_k=3)
+                top_chunks = search_qdrant(QDRANT_COLLECTION, question, top_k=7)
                 context = join_all_lines("\n".join(top_chunks))
                 contexts.append(context)
 
@@ -223,7 +244,8 @@ async def process_doc(
 
 app.include_router(api_router)
 
-# ------------------ Uvicorn Entry ----------------------
+# ------------------ Entrypoint ------------------
 
 if __name__ == "__main__":
     uvicorn.run("Server:app", host="0.0.0.0", port=PORT)
+
