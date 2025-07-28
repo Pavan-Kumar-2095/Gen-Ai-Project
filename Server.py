@@ -252,6 +252,9 @@ async def process_doc(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+app.include_router(api_router)
 
+if __name__ == "__main__":
+    uvicorn.run("Server:app", host="0.0.0.0", port=port)
 
 
