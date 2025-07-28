@@ -8,3 +8,4 @@ numpy
 requests
 PyMuPDF
 mammoth   
+fastembed
