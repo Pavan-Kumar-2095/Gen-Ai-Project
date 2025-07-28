@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, Header, APIRouter
+from fastapi import FastAPI, HTTPException, Body, Header, APIRouter
 from fastapi.responses import JSONResponse
 from typing import Optional, List
 import os
@@ -6,54 +6,44 @@ import tempfile
 import time
 import uvicorn
 import requests
-from sentence_transformers import SentenceTransformer
 import uuid
 from dotenv import load_dotenv
 import aiohttp
 from pydantic import BaseModel
-import asyncio
 import re
-import numpy as np
 import math
-import qdrant_client
-from qdrant_client.http import models as qdrant_models
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import PointStruct, VectorParams, Distance
 
+# Load env variables
 load_dotenv()
 
+# Setup FastAPI
 app = FastAPI()
+api_router = APIRouter(prefix="/api/v1")
 
-# 🔐 API key for Gemini
+# Auth & API keys
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BEARER = os.getenv("BEARER_KEY")
-port = int(os.getenv("PORT", 8000))
+PORT = int(os.getenv("PORT", 8000))
 
 # Qdrant setup
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # If needed
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # Optional for cloud
 QDRANT_COLLECTION = "documents"
 
-qdrant = qdrant_client.QdrantClient(
+qdrant = QdrantClient(
     url=QDRANT_URL,
     api_key=QDRANT_API_KEY,
     prefer_grpc=False
 )
 
-# Create collection if not exists
-if QDRANT_COLLECTION not in [col.name for col in qdrant.get_collections().collections]:
-    qdrant.recreate_collection(
-        collection_name=QDRANT_COLLECTION,
-        vectors_config=qdrant_models.VectorParams(
-            size=384,  # embedding dim of all-MiniLM-L6-v2
-            distance=qdrant_models.Distance.COSINE
-        )
-    )
-
-# Initialize model
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
+# --------------------- Models ---------------------
 class DocumentRequest(BaseModel):
     documents: Optional[str] = None
     questions: Optional[List[str]] = None
+
+# ------------------ Utilities ---------------------
 
 def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400) -> list[str]:
     chunks = []
@@ -64,43 +54,31 @@ def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400) -> l
         start += chunk_size - chunk_overlap
     return chunks
 
-
-async def get_embeddings(text_list):
-    return embedding_model.encode(text_list, convert_to_numpy=True).tolist()
-
-async def upload_to_qdrant(embeddings, chunks, batch_size=200):
-    points = []
-    for i, (embedding, chunk) in enumerate(zip(embeddings, chunks)):
-        point = qdrant_models.PointStruct(
-            id=str(uuid.uuid4()),
-            vector=embedding,
-            payload={"text": chunk}
-        )
-        points.append(point)
-
-        if len(points) >= batch_size:
-            qdrant.upsert(collection_name=QDRANT_COLLECTION, points=points)
-            points.clear()
-
-    # Upload remaining points
-    if points:
-        qdrant.upsert(collection_name=QDRANT_COLLECTION, points=points)
-    print(f"[✓] Uploaded {len(chunks)} chunks to Qdrant in batches of {batch_size}")
-
-async def search_qdrant(vector, top_k=5):
-    search_result = qdrant.search(
-        collection_name=QDRANT_COLLECTION,
-        query_vector=vector,
-        limit=top_k,
-        with_payload=True
+def upload_chunks_with_qdrant(collection_name: str, texts: list[str]):
+    qdrant.recreate_collection(
+        collection_name=collection_name,
+        vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
     )
-    results = []
-    for hit in search_result:
-        chunk_text = hit.payload.get("text", "")
-        results.append({"chunk": chunk_text, "score": hit.score})
-    return results
+    points = [
+        PointStruct(id=str(uuid.uuid4()), payload={"text": text}, vector=None)
+        for text in texts
+    ]
+    qdrant.upload_points(
+        collection_name=collection_name,
+        points=points,
+        batch_size=64,
+        embedding_model="text2vec-openai"
+    )
+    print(f"[✓] Uploaded {len(texts)} chunks using Qdrant's built-in embeddings")
 
-# Helper functions (query_gemini, build_prompt, parse_answers, join_all_lines, choose_batch_size)
+def search_qdrant(collection_name: str, query: str, top_k: int = 5):
+    results = qdrant.search(
+        collection_name=collection_name,
+        query_text=query,
+        top=top_k,
+        embedding_model="text2vec-openai"
+    )
+    return [hit.payload["text"] for hit in results if "text" in hit.payload]
 
 async def query_gemini(prompt: str) -> str:
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -149,16 +127,13 @@ def choose_batch_size(num_questions: int) -> int:
         percentage = 0.75
     else:
         percentage = 0.80
-    batch_size = math.ceil(num_questions * percentage)
-    return min(batch_size, 1000)
+    return min(math.ceil(num_questions * percentage), 1000)
 
-# Root endpoint
+# ------------------- FastAPI Routes --------------------
+
 @app.get("/")
 def root():
     return {"message": "***** Qdrant-based FastAPI server running *****"}
-
-# Create a router with prefix /api/v1
-api_router = APIRouter(prefix="/api/v1")
 
 @api_router.post("/hackrx/run")
 async def process_doc(
@@ -175,7 +150,7 @@ async def process_doc(
         filename = url.split("?")[0].split("/")[-1]
         ext = filename.split(".")[-1].lower()
 
-        # Download document content
+        # Download document
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
@@ -216,32 +191,21 @@ async def process_doc(
         if not text.strip():
             raise HTTPException(status_code=400, detail="Document contains no extractable text.")
 
-        # Chunk & embed
+        # Chunk and upload
         chunks = chunk_text(text)
         questions = body.questions or []
 
-        start_embedd = time.perf_counter()
+        upload_chunks_with_qdrant(QDRANT_COLLECTION, chunks)
 
-        embeddings, query_embeddings = await asyncio.gather(
-            get_embeddings(chunks),
-            get_embeddings(questions)
-        )
-        end_embedd = time.perf_counter()
-
-        # Upload chunks + embeddings to Qdrant in batches of 200
-        await upload_to_qdrant(embeddings, chunks, batch_size=200)
-
-        # Process questions
+        # Question answering
         answers = []
         batch_size_questions = choose_batch_size(len(questions))
-
         for i in range(0, len(questions), batch_size_questions):
             batch_questions = questions[i:i + batch_size_questions]
-            batch_embeddings = query_embeddings[i:i + batch_size_questions]
             contexts = []
-            for embedding in batch_embeddings:
-                top_chunks = await search_qdrant(embedding, top_k=3)
-                context = join_all_lines("\n".join([c['chunk'] for c in top_chunks]))
+            for question in batch_questions:
+                top_chunks = search_qdrant(QDRANT_COLLECTION, question, top_k=3)
+                context = join_all_lines("\n".join(top_chunks))
                 contexts.append(context)
 
             prompt = build_prompt(batch_questions, contexts)
@@ -250,11 +214,8 @@ async def process_doc(
             answers.extend(batch_answers)
 
         end = time.perf_counter()
+        print(f"[✓] Total Processing time: {end - start:.2f} seconds")
 
-        print("embedding time", end_embedd - start_embedd)
-        print(f"total query Processing time: {end - end_embedd:.2f} seconds")
-        print(f"total Processing time: {end - start:.2f} seconds")
-        print(GEMINI_API_KEY[-2:])
         return {"answers": answers}
 
     except Exception as e:
@@ -262,7 +223,7 @@ async def process_doc(
 
 app.include_router(api_router)
 
+# ------------------ Uvicorn Entry ----------------------
+
 if __name__ == "__main__":
-    uvicorn.run("test:app", host="0.0.0.0", port=port)
-
-
+    uvicorn.run("Server:app", host="0.0.0.0", port=PORT)
