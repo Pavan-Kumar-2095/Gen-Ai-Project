@@ -32,7 +32,11 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION = "documents"
 
 # You can switch to ":memory:" or local host depending on your use
-qdrant = QdrantClient(":memory:")
+qdrant = QdrantClient(
+    url = QDRANT_URL,
+    api_key = QDRANT_API_KEY
+)
+
 
 # ------------------ Request Models ------------------
 
