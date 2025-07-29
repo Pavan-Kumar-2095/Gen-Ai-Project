@@ -1,15 +1,12 @@
 from fastapi import FastAPI, HTTPException, Body, Header, APIRouter
 from fastapi.responses import JSONResponse
 from typing import Optional, List
-import os
-import tempfile
-import time
-import uvicorn
-import requests
-import uuid
-from dotenv import load_dotenv
-import aiohttp
 from pydantic import BaseModel
+from dotenv import load_dotenv
+import os
+import aiohttp
+import time
+import uuid
 import re
 import math
 
@@ -17,13 +14,12 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import PointStruct, VectorParams, Distance
 from qdrant_client.models import Document
 
-# ------------------ Environment & Config ------------------
-
+# Load environment variables
 load_dotenv()
 
-app = FastAPI()
-api_router = APIRouter(prefix="/api/v1")
+# -------------------- Config --------------------
 
+PDFCO_API_KEY = os.getenv("PDFCO_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BEARER = os.getenv("BEARER_KEY")
 PORT = int(os.getenv("PORT", 8000))
@@ -31,20 +27,21 @@ QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION = "documents"
 
-# You can switch to ":memory:" or local host depending on your use
 qdrant = QdrantClient(
-    url = QDRANT_URL,
-    api_key = QDRANT_API_KEY
+    url=QDRANT_URL,
+    api_key=QDRANT_API_KEY
 )
 
+app = FastAPI()
+api_router = APIRouter(prefix="/api/v1")
 
-# ------------------ Request Models ------------------
+# -------------------- Models --------------------
 
 class DocumentRequest(BaseModel):
     documents: Optional[str] = None
     questions: Optional[List[str]] = None
 
-# ------------------ Utilities ------------------
+# -------------------- Utils --------------------
 
 def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400) -> list[str]:
     chunks = []
@@ -70,17 +67,12 @@ def upload_chunks_with_qdrant(collection_name: str, texts: list[str]):
     payloads = [{"text": chunk} for chunk in texts]
     ids = [str(uuid.uuid4()) for _ in texts]
 
-    try:
-        qdrant.upload_collection(
-            collection_name=collection_name,
-            vectors=documents,
-            payload=payloads,
-            ids=ids
-        )
-        print(f"[✓] Uploaded {len(texts)} chunks using FastEmbed ({model_name})")
-    except Exception as e:
-        print("[!] Upload failed after retries:", str(e))
-        raise
+    qdrant.upload_collection(
+        collection_name=collection_name,
+        vectors=documents,
+        payload=payloads,
+        ids=ids
+    )
 
 def search_qdrant(collection_name: str, query: str, top_k: int = 7) -> list[str]:
     model_name = "BAAI/bge-small-en"
@@ -94,29 +86,13 @@ def search_qdrant(collection_name: str, query: str, top_k: int = 7) -> list[str]
 async def query_gemini(prompt: str) -> str:
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    response = requests.post(endpoint, json=payload)
-    if response.ok:
-        return response.json()['candidates'][0]['content']['parts'][0]['text']
-    else:
-        return f"Gemini API failed: {response.status_code} - {response.text}"
-
-import re
-from typing import List
-
-def parse_answers(response: str, num_questions: int) -> List[str]:
-    print("Raw response:", response)  # debug print
-    pattern = r"Answer\s*(\d+)\s*:\s*(.*?)(?=\s*Answer\s*\d+\s*:|$)"
-    matches = re.findall(pattern, response, re.DOTALL | re.IGNORECASE)
-    print("Matches found:", matches)  # debug print
-    
-    answers = ["The document "] * num_questions
-    for match in matches:
-        idx, ans = int(match[0]) - 1, match[1].strip()
-        if 0 <= idx < num_questions and ans:
-            answers[idx] = ans
-    return answers
-
-
+    async with aiohttp.ClientSession() as session:
+        async with session.post(endpoint, json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data['candidates'][0]['content']['parts'][0]['text']
+            else:
+                raise HTTPException(status_code=500, detail="Gemini API failed")
 
 def build_prompt(questions: List[str], contexts: List[str]) -> str:
     answers_header = "\n".join([f"Answer {i + 1}: <your answer to Q{i + 1}>" for i in range(len(questions))])
@@ -132,7 +108,15 @@ def build_prompt(questions: List[str], contexts: List[str]) -> str:
     )
     return prompt
 
-
+def parse_answers(response: str, num_questions: int) -> List[str]:
+    pattern = r"Answer\s*(\d+)\s*:\s*(.*?)(?=\s*Answer\s*\d+\s*:|$)"
+    matches = re.findall(pattern, response, re.DOTALL | re.IGNORECASE)
+    answers = ["The document "] * num_questions
+    for match in matches:
+        idx, ans = int(match[0]) - 1, match[1].strip()
+        if 0 <= idx < num_questions and ans:
+            answers[idx] = ans
+    return answers
 
 def join_all_lines(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
@@ -152,11 +136,55 @@ def choose_batch_size(num_questions: int) -> int:
         percentage = 0.80
     return min(math.ceil(num_questions * percentage), 1000)
 
-# ------------------ Routes ------------------
+# -------------------- PDF.co Integration --------------------
 
-@app.get("/")
-def root():
-    return {"message": "***** Qdrant-based FastAPI server running *****"}
+async def convert_to_pdfco_pdf(file_url: str) -> str:
+    endpoint = "https://api.pdf.co/v1/file/convert/to/pdf"
+    headers = {
+        "x-api-key": PDFCO_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "url": file_url,
+        "inline": True
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(endpoint, headers=headers, json=payload) as resp:
+            result = await resp.json()
+            if result.get("error", False):
+                raise HTTPException(status_code=400, detail=f"PDF.co conversion error: {result.get('message')}")
+            return result.get("url")
+
+async def extract_text_from_pdfco(file_url: str) -> str:
+    ext = file_url.split("?")[0].split(".")[-1].lower()
+
+    if ext in {"docx", "eml"}:
+        file_url = await convert_to_pdfco_pdf(file_url)
+
+    pdfco_endpoint = "https://api.pdf.co/v1/pdf/convert/to/text"
+    headers = {
+        "x-api-key": PDFCO_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "url": file_url,
+        "inline": True
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(pdfco_endpoint, headers=headers, json=payload) as resp:
+            result = await resp.json()
+
+            if result.get("error"):
+                raise HTTPException(status_code=400, detail=f"PDF.co Error: {result.get('message')}")
+
+            text = result.get("body", "").strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="PDF.co returned no text.")
+            return text
+
+# -------------------- Route --------------------
 
 @api_router.post("/hackrx/run")
 async def process_doc(
@@ -170,59 +198,15 @@ async def process_doc(
 
     try:
         url = body.documents
-        filename = url.split("?")[0].split("/")[-1]
-        ext = filename.split(".")[-1].lower()
-
-        # Download document
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    raise HTTPException(status_code=400, detail="Failed to fetch document from URL.")
-                contents = await resp.read()
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
-            tmp.write(contents)
-            tmp_path = tmp.name
-
-        # Extract text based on format
-        if ext == "pdf":
-            import fitz
-            doc = fitz.open(tmp_path)
-            text = "\n".join([page.get_text() for page in doc])
-        elif ext == "docx":
-            import mammoth
-            result = mammoth.extract_raw_text({'path': tmp_path})
-            text = result.value
-        elif ext == "eml":
-            import email
-            from email import policy
-            from email.parser import BytesParser
-            with open(tmp_path, 'rb') as fp:
-                msg = BytesParser(policy=policy.default).parse(fp)
-                parts = [f"Subject: {msg['subject']}", f"From: {msg['from']}", f"To: {msg['to']}"]
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == 'text/plain':
-                            parts.append(part.get_content())
-                            break
-                else:
-                    parts.append(msg.get_content())
-                text = "\n".join(parts)
-        elif ext == "txt":
-            with open(tmp_path, "r", encoding="utf-8") as f:
-                text = f.read()
-        else:
-            raise HTTPException(status_code=400, detail="Only .pdf, .docx, .txt, or .eml files are supported.")
-
-        if not text.strip():
-            raise HTTPException(status_code=400, detail="Document contains no extractable text.")
-
-        # Chunk and upload
-        chunks = chunk_text(text)
         questions = body.questions or []
+
+        text = await extract_text_from_pdfco(url)
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Empty text extracted.")
+
+        chunks = chunk_text(text)
         upload_chunks_with_qdrant(QDRANT_COLLECTION, chunks)
 
-        # Run QA loop
         answers = []
         batch_size_questions = choose_batch_size(len(questions))
         for i in range(0, len(questions), batch_size_questions):
@@ -241,15 +225,22 @@ async def process_doc(
         end = time.perf_counter()
         print(f"[✓] Total Processing time: {end - start:.2f} seconds")
 
-        return {"answers": answers}
+        return {
+            "answers": answers,
+            "text": text[:10000]
+        }
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+@app.get("/")
+def root():
+    return {"message": "✓ FastAPI Q&A server is running."}
+
 app.include_router(api_router)
 
-# ------------------ Entrypoint ------------------
+# -------------------- Entrypoint --------------------
 
 if __name__ == "__main__":
-    uvicorn.run("Server:app", host="0.0.0.0", port=PORT)
-
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
