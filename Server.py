@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Body, Header, APIRouter
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from typing import Optional, List
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -48,7 +49,9 @@ def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400) -> l
     start = 0
     while start < len(text):
         end = start + chunk_size
-        chunks.append(text[start:end])
+        chunk = text[start:end].strip()
+        if chunk:  # Ensure no empty or None chunks
+            chunks.append(chunk)
         start += chunk_size - chunk_overlap
     return chunks
 
@@ -65,6 +68,12 @@ def upload_chunks_with_qdrant(collection_name: str, texts: list[str]):
 
     documents = [Document(text=chunk, model=model_name) for chunk in texts]
     payloads = [{"text": chunk} for chunk in texts]
+
+    # Ensure all payload keys are strings
+    for payload in payloads:
+        if any(key is None for key in payload.keys()):
+            raise ValueError(f"Invalid payload key detected: {payload}")
+
     ids = [str(uuid.uuid4()) for _ in texts]
 
     qdrant.upload_collection(
@@ -225,22 +234,33 @@ async def process_doc(
         end = time.perf_counter()
         print(f"[✓] Total Processing time: {end - start:.2f} seconds")
 
-        return {
-            "answers": answers,
-            "text": text[:10000]
-        }
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "answers": answers,
+                "text": text[:10000]  # limit to 10,000 characters to avoid response bloat
+            })
+        )
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
+        # Catch unexpected issues and return a safe JSON error
+        print(f"[✗] Error during processing: {e}")
+        return JSONResponse(
+            status_code=500,
+            content=jsonable_encoder({
+                "error": "Internal server error",
+                "detail": str(e)
+            })
+        )
 @app.get("/")
 def root():
     return {"message": "✓ FastAPI Q&A server is running."}
 
+# Include the API router
 app.include_router(api_router)
 
-# -------------------- Entrypoint --------------------
-
+# Entrypoint for standalone execution
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
+    uvicorn.run("your_module_name:app", host="0.0.0.0", port=PORT, reload=True)
+
