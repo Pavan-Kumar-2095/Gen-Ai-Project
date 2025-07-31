@@ -234,6 +234,11 @@ async def process_doc(
     except Exception as e:
         print("[ERROR]", str(e))
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+    
+@app.get("/")
+async def health_check():
+    return {"status": "ok"}
+
 
 # -------------------- Register Router --------------------
 app.include_router(api_router)
