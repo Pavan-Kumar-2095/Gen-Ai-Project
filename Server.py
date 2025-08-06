@@ -1,143 +1,83 @@
 from fastapi import FastAPI, HTTPException, Body, Header, APIRouter
 from fastapi.responses import JSONResponse
-from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
-from pydantic import BaseModel
-from dotenv import load_dotenv
 import os
-import aiohttp
+import tempfile
 import time
-import uuid
-import re
+import requests
+import aiohttp
 import math
+import threading
+import faiss
+import re
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from pydantic import BaseModel
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from dotenv import load_dotenv
+import uvicorn
 
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import PointStruct, VectorParams, Distance
-from qdrant_client.models import Document
+app = FastAPI()
 
-# -------------------- Load Environment --------------------
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 load_dotenv()
-
-PDFCO_API_KEY = os.getenv("PDFCO_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BEARER = os.getenv("BEARER_KEY")
 PORT = int(os.getenv("PORT", 8000))
-QDRANT_URL = os.getenv("QDRANT_URL")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_COLLECTION = "documents"
 
-print("[DEBUG] QDRANT_URL:", QDRANT_URL)
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-qdrant = QdrantClient(
-    url=QDRANT_URL,
-    api_key=QDRANT_API_KEY
-)
+# Global state
+faiss_index = None
+faiss_chunks = []
+faiss_document_url = None
+faiss_lock = threading.Lock()
 
-app = FastAPI()
-api_router = APIRouter(prefix="/api/v1")
-
-# -------------------- Models --------------------
 class DocumentRequest(BaseModel):
     documents: Optional[str] = None
     questions: Optional[List[str]] = None
 
-# -------------------- Utils --------------------
-def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 400) -> list[str]:
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        start += chunk_size - chunk_overlap
-    print(f"[DEBUG] Total chunks created: {len(chunks)}")
-    return chunks
-
-def upload_chunks_with_qdrant(collection_name: str, texts: list[str]):
-    model_name = "BAAI/bge-small-en"
-    vector_size = 384  # Set manually to avoid get_embedding_size
-
-    if qdrant.collection_exists(collection_name):
-        qdrant.delete_collection(collection_name)
-
-    qdrant.create_collection(
-        collection_name=collection_name,
-        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+def chunk_text(text: str):
+    splitter = RecursiveCharacterTextSplitter(
+        separators=['\n\n', '\n', '.', ','],
+        chunk_size=1500,
+        chunk_overlap=400
     )
+    return splitter.split_text(text)
 
-    documents = []
-    payloads = []
-    ids = []
+def join_all_lines(text: str) -> str:
+    return re.sub(r'\s+', ' ', text).strip()
 
-    for chunk in texts:
-        if not chunk or not isinstance(chunk, str):
-            continue  # Skip invalid chunks
-        documents.append(Document(text=chunk, model=model_name))
-        payloads.append({"text": chunk})
-        ids.append(str(uuid.uuid4()))
-
-    print(f"[DEBUG] Uploading {len(documents)} documents to Qdrant")
-
-    try:
-        qdrant.upload_collection(
-            collection_name=collection_name,
-            vectors=documents,
-            payload=payloads,
-            ids=ids
-        )
-        print("[DEBUG] Upload completed.")
-    except Exception as e:
-        print("[ERROR] Failed to upload to Qdrant:", e)
-        raise HTTPException(status_code=500, detail=f"Qdrant upload error: {str(e)}")
-
-
-def search_qdrant(collection_name: str, query: str, top_k: int = 7) -> list[str]:
-    model_name = "BAAI/bge-small-en"
-    result = qdrant.query_points(
-        collection_name=collection_name,
-        query=Document(text=query, model=model_name),
-        limit=top_k
-    )
-    return [point.payload.get("text", "") for point in result.points]
-
-async def query_gemini(prompt: str) -> str:
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(endpoint, json=payload) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data['candidates'][0]['content']['parts'][0]['text']
-            else:
-                raise HTTPException(status_code=500, detail="Gemini API failed")
-
-def build_prompt(questions: List[str], contexts: List[str]) -> str:
+def build_prompt(questions: list[str], contexts: list[str]) -> str:
     answers_header = "\n".join([f"Answer {i + 1}: <your answer to Q{i + 1}>" for i in range(len(questions))])
     documents_questions = ""
     for i, (context, question) in enumerate(zip(contexts, questions)):
         documents_questions += f"\nDocument {i + 1}:\n{context}\n\nQ{i + 1}: {question}\n\n---"
     prompt = (
-        f"Answer the following questions using only their respective Document.\n\n"
-        f"Keep each answer to one concise sentence.\n"
-        f"Respond **only** in the exact format below, without adding anything else:\n\n"
-        f"{answers_header}\n\n"
-        f"{documents_questions.strip()}"
+        f"Answer the following questions using only their respective Document. "
+        f"Keep each answer to one concise sentence. Respond in **this exact format**:\n\n"
+        f"{answers_header}\n\n{documents_questions.strip()}"
     )
     return prompt
 
-def parse_answers(response: str, num_questions: int) -> List[str]:
-    pattern = r"Answer\s*(\d+)\s*:\s*(.*?)(?=\s*Answer\s*\d+\s*:|$)"
+def parse_answers(response: str, num_questions: int) -> list[str]:
+    pattern = r"Answer\s+(\d+):\s*(.*?)(?=\s*Answer\s+\d+:|$)"
     matches = re.findall(pattern, response, re.DOTALL | re.IGNORECASE)
-    answers = [""] * num_questions
+    answers = ["The document "] * num_questions
     for match in matches:
         idx, ans = int(match[0]) - 1, match[1].strip()
-        if 0 <= idx < num_questions:
+        if 0 <= idx < num_questions and ans:
             answers[idx] = ans
     return answers
-
-def join_all_lines(text: str) -> str:
-    return re.sub(r'\s+', ' ', text).strip()
 
 def choose_batch_size(num_questions: int) -> int:
     if num_questions <= 40:
@@ -152,99 +92,144 @@ def choose_batch_size(num_questions: int) -> int:
         percentage = 0.75
     else:
         percentage = 0.80
-    return min(math.ceil(num_questions * percentage), 1000)
+    batch_size = math.ceil(num_questions * percentage)
+    return min(batch_size, 1000)
 
-# -------------------- PDF.co Integration --------------------
-async def convert_to_pdfco_pdf(file_url: str) -> str:
-    endpoint = "https://api.pdf.co/v1/file/convert/to/pdf"
-    headers = {"x-api-key": PDFCO_API_KEY, "Content-Type": "application/json"}
-    payload = {"url": file_url, "inline": True}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(endpoint, headers=headers, json=payload) as resp:
-            result = await resp.json()
-            if result.get("error", False):
-                raise HTTPException(status_code=400, detail=f"PDF.co error: {result.get('message')}")
-            return result.get("url")
+async def query_gemini(prompt):
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    response = requests.post(endpoint, json=payload)
+    if response.ok:
+        return response.json()['candidates'][0]['content']['parts'][0]['text']
+    else:
+        return f"Gemini API failed: {response.status_code} - {response.text}"
 
-async def extract_text_from_pdfco(file_url: str) -> str:
-    print(f"[DEBUG] extract_text_from_pdfco called with url: {file_url}")
-    ext = file_url.split("?")[0].split(".")[-1].lower()
-    if ext in {"docx", "eml"}:
-        file_url = await convert_to_pdfco_pdf(file_url)
+# Define router BEFORE use
+api_router = APIRouter(prefix="/api/v1")
 
-    pdfco_endpoint = "https://api.pdf.co/v1/pdf/convert/to/text"
-    headers = {"x-api-key": PDFCO_API_KEY, "Content-Type": "application/json"}
-    payload = {"url": file_url, "inline": True}
-
-    print(f"[DEBUG] Sending payload to PDF.co: {payload}")
-    async with aiohttp.ClientSession() as session:
-        async with session.post(pdfco_endpoint, headers=headers, json=payload) as resp:
-            result = await resp.json()
-            if result.get("error"):
-                raise HTTPException(status_code=400, detail=f"PDF.co Error: {result.get('message')}")
-            text = result.get("body", "").strip()
-            if not text:
-                raise HTTPException(status_code=400, detail="PDF.co returned no text.")
-            return text
-
-# -------------------- Route --------------------
 @api_router.post("/hackrx/run")
 async def process_doc(
     body: DocumentRequest = Body(...),
     authorization: Optional[str] = Header(None),
 ):
+    global faiss_index, faiss_chunks, faiss_document_url
+
     start = time.perf_counter()
 
     if not authorization or authorization != BEARER:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    url = body.documents
+    questions = body.questions or []
+
+    if not url:
+        raise HTTPException(status_code=400, detail="Document URL is required.")
+
     try:
-        url = body.documents
-        questions = body.questions or []
+        with faiss_lock:
+            if faiss_document_url != url:
+                faiss_index = None
+                faiss_chunks = []
+                faiss_document_url = None
 
-        print("[DEBUG] Starting text extraction")
-        text = await extract_text_from_pdfco(url)
+        if faiss_index is None:
+            filename = url.split("?")[0].split("/")[-1]
+            ext = filename.split(".")[-1].lower()
 
-        if not text.strip():
-            raise HTTPException(status_code=400, detail="Empty text extracted.")
+            # Download file
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        raise HTTPException(status_code=400, detail="Failed to fetch document from URL.")
+                    contents = await resp.read()
 
-        print("[DEBUG] Starting chunking")
-        chunks = chunk_text(text)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+                tmp.write(contents)
+                tmp_path = tmp.name
 
-        print("[DEBUG] Uploading chunks to Qdrant")
-        upload_chunks_with_qdrant(QDRANT_COLLECTION, chunks)
+            # Extract text
+            if ext == "pdf":
+                import fitz
+                doc = fitz.open(tmp_path)
+                text = "\n".join([page.get_text() for page in doc])
+            elif ext == "docx":
+                import mammoth
+                result = mammoth.extract_raw_text({'path': tmp_path})
+                text = result.value
+            elif ext == "eml":
+                import email
+                from email import policy
+                from email.parser import BytesParser
+                with open(tmp_path, 'rb') as fp:
+                    msg = BytesParser(policy=policy.default).parse(fp)
+                    parts = [f"Subject: {msg['subject']}", f"From: {msg['from']}", f"To: {msg['to']}"]
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == 'text/plain':
+                                parts.append(part.get_content())
+                                break
+                    else:
+                        parts.append(msg.get_content())
+                    text = "\n".join(parts)
+            else:
+                raise HTTPException(status_code=400, detail="Unsupported file type")
+
+            if not text.strip():
+                raise HTTPException(status_code=400, detail="Empty or unextractable document")
+
+            chunks = chunk_text(text)
+            embeddings = embedding_model.encode(chunks, convert_to_numpy=True).astype('float32')
+            faiss.normalize_L2(embeddings)
+
+            dim = embeddings.shape[1]
+            index = faiss.IndexFlatIP(dim)
+            index.add(embeddings)
+
+            with faiss_lock:
+                faiss_index = index
+                faiss_chunks = chunks
+                faiss_document_url = url
+
+        query_embeddings = embedding_model.encode(questions, convert_to_numpy=True).astype('float32')
+        faiss.normalize_L2(query_embeddings)
 
         answers = []
-        batch_size_questions = choose_batch_size(len(questions))
-        for i in range(0, len(questions), batch_size_questions):
-            batch_questions = questions[i:i + batch_size_questions]
+        batch_size = choose_batch_size(len(questions))
+
+        with faiss_lock:
+            index = faiss_index
+            chunks = faiss_chunks
+
+        for i in range(0, len(questions), batch_size):
+            batch_qs = questions[i:i + batch_size]
+            batch_embeds = query_embeddings[i:i + batch_size]
             contexts = []
-            for question in batch_questions:
-                top_chunks = search_qdrant(QDRANT_COLLECTION, question, top_k=7)
+
+            for embed in batch_embeds:
+                D, I = index.search(np.array([embed]), 3)
+                top_chunks = [chunks[idx] for idx in I[0] if idx < len(chunks)]
                 context = join_all_lines("\n".join(top_chunks))
                 contexts.append(context)
 
-            prompt = build_prompt(batch_questions, contexts)
+            prompt = build_prompt(batch_qs, contexts)
             response = await query_gemini(prompt)
-            answers_batch = parse_answers(response, len(batch_questions))
-            answers.extend(answers_batch)
+            batch_answers = parse_answers(response, len(batch_qs))
+            answers.extend(batch_answers)
 
-        print(f"[DEBUG] Total time: {time.perf_counter() - start:.2f} seconds")
-        return JSONResponse(content={"answers": answers})
+        return {
+            "answers": answers,
+            "last_response_time": time.perf_counter() - start
+        }
+
     except Exception as e:
-        print("[ERROR]", str(e))
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
-    
-@app.get("/")
-async def health_check():
-    return {"status": "ok"}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# -------------------- Register Router --------------------
+# ✅ Mount the router after defining it and its routes
 app.include_router(api_router)
 
-# -------------------- Run --------------------
+@app.get("/")
+def root():
+    return {"message": "FAISS server running"}
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run("Server:app", host="0.0.0.0", port=PORT)

@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Document Q&A Interface</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #121212;
+      color: #e0e0e0;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+      margin: 0;
+      padding: 40px 20px;
+    }
+
+    .container {
+      background-color: #1a1a1a;
+      border-radius: 12px;
+      box-shadow: 0 0 30px rgba(0, 255, 255, 0.07);
+      padding: 40px;
+      width: 100%;
+      max-width: 720px;
+      box-sizing: border-box;
+      animation: fadeIn 0.6s ease;
+    }
+
+    h1 {
+      text-align: center;
+      color: #00d1ff;
+      margin-bottom: 35px;
+      font-weight: 600;
+      animation: fadeInDown 0.8s ease;
+    }
+
+    label {
+      font-weight: 600;
+      margin-bottom: 8px;
+      display: block;
+      color: #a0a0a0;
+      animation: fadeIn 1s ease;
+    }
+
+    input[type="text"],
+    textarea {
+      width: 100%;
+      padding: 14px 16px;
+      margin-bottom: 25px;
+      border: 1px solid #333;
+      border-radius: 8px;
+      font-size: 15px;
+      background-color: #1e1e1e;
+      color: #f5f5f5;
+      transition: all 0.3s ease;
+      box-sizing: border-box;
+      animation: fadeInUp 1s ease;
+    }
+
+    input[type="text"]:focus,
+    textarea:focus {
+      border-color: #00d1ff;
+      outline: none;
+      box-shadow: 0 0 8px rgba(0, 209, 255, 0.4);
+    }
+
+    button {
+      background: linear-gradient(135deg, #00d1ff, #008cff);
+      color: white;
+      padding: 14px;
+      font-size: 16px;
+      font-weight: 600;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      width: 100%;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 15px rgba(0, 209, 255, 0.2);
+      animation: fadeInUp 1.2s ease;
+    }
+
+    button:hover {
+      background: linear-gradient(135deg, #00bbff, #0066cc);
+      box-shadow: 0 6px 20px rgba(0, 209, 255, 0.4);
+      transform: scale(1.01);
+    }
+
+    #answers {
+      margin-top: 40px;
+      animation: fadeIn 1.5s ease;
+    }
+
+    h2 {
+      color: #00ffae;
+      border-bottom: 2px solid #00ffae;
+      padding-bottom: 8px;
+      margin-bottom: 20px;
+    }
+
+    .answer-block {
+      background-color: #222;
+      padding: 16px 20px;
+      margin-bottom: 16px;
+      border-left: 5px solid #00ffae;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0, 255, 174, 0.07);
+      transition: all 0.3s ease;
+      animation: fadeInUp 0.8s ease;
+    }
+
+    .answer-block:hover {
+      background-color: #2a2a2a;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(0, 255, 174, 0.15);
+    }
+
+    .answer-block strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #ffffff;
+      font-weight: 600;
+    }
+
+    /* Animations */
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes fadeInDown {
+      from {
+        opacity: 0;
+        transform: translateY(-20px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+      }
+      to {
+        opacity: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📄 Ask Questions from Document</h1>
+
+    <label for="docUrl">Document URL (.pdf, .docx, or .eml):</label>
+    <input type="text" id="docUrl" placeholder="Paste document URL here" />
+
+    <label for="questions">Questions (one per line):</label>
+    <textarea id="questions" rows="10" placeholder="What is the grace period?&#10;What is the coverage for maternity?"></textarea>
+
+    <button onclick="submitQuestions()">🔍 Submit</button>
+
+    <div id="answers"></div>
+  </div>
+
+  <script>
+    const API_URL = "http://localhost:8000/api/v1/hackrx/run";
+    const AUTH_TOKEN = "fc3fb7ea7e00291256bfa945f2d45d1fed6ceb80a5d8763563d12816dcbc9e8d";
+
+    async function submitQuestions() {
+      const docUrl = document.getElementById("docUrl").value;
+      const questionLines = document.getElementById("questions").value
+        .split("\n")
+        .filter(q => q.trim() !== "");
+
+      if (!docUrl || questionLines.length === 0) {
+        alert("Please provide both the document URL and at least one question.");
+        return;
+      }
+
+      document.getElementById("answers").innerHTML = "⏳ Processing...";
+
+      try {
+        const response = await fetch(API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": `Bearer ${AUTH_TOKEN}`
+          },
+          body: JSON.stringify({
+            documents: docUrl,
+            questions: questionLines
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || data.error || "Something went wrong.");
+        }
+
+        const responseTime = data.last_response_time
+        displayAnswers(data.answers, responseTime);
+      } catch (err) {
+        document.getElementById("answers").innerHTML =
+          `<div style="color:red;">❌ Error: ${err.message}</div>`;
+      }
+    }
+
+    function displayAnswers(answers, responseTime) {
+      const container = document.getElementById("answers");
+      container.innerHTML = `
+        <h2>✅ Answers:</h2>
+        <p style="color: #00ffae; font-weight: 500; margin-bottom: 20px;">
+          ⏱ Response Time: ${responseTime} seconds
+        </p>
+      `;
+
+      answers.forEach((ans, i) => {
+        const div = document.createElement("div");
+        div.className = "answer-block";
+        div.innerHTML = `<strong>Q${i + 1}:</strong> ${ans}`;
+        container.appendChild(div);
+      });
+    }
+  </script>
+</body>
+</html>
