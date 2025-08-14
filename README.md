@@ -63,6 +63,6 @@ Large Language Models (LLMs) are powerful, but processing entire documents direc
 ### 📦 Installation
 
 ```bash
-git clone https://github.com/your-username/docuquery.git
-cd docuquery
+git clone https://github.com/Pavan-Kumar-2095/Gen-Ai-Project.git
+cd Gen-Ai-Project
 pip install -r requirements.txt
