@@ -229,7 +229,7 @@ app.include_router(api_router)
 
 @app.get("/")
 def root():
-    return {"message": "FAISS server running"}
+    return {"message": "FAISS server running on port 8000"}
 
 if __name__ == "__main__":
     uvicorn.run("Server:app", host="0.0.0.0", port=PORT)

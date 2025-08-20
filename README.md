@@ -58,11 +58,4 @@ Large Language Models (LLMs) are powerful, but processing entire documents direc
 
 ---
 
-## 🚀 Getting Started
 
-### 📦 Installation
-
-```bash
-git clone https://github.com/Pavan-Kumar-2095/Gen-Ai-Project.git
-cd Gen-Ai-Project
-pip install -r requirements.txt
