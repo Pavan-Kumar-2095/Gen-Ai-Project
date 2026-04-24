@@ -9,11 +9,11 @@ It enables users to:
 - Receive concise, context-aware AI-generated answers
 
 ---
+
 ## 🎥 Demo Video
 
-<video width="100%" controls>
-  <source src="https://raw.githubusercontent.com/Pavan-Kumar-2095/Gen-Ai-Project/main/DemoVideo/DemoVideo.mp4" type="video/mp4">
-</video>
+👉 Watch the demo video here:  
+https://raw.githubusercontent.com/Pavan-Kumar-2095/Gen-Ai-Project/main/DemoVideo/DemoVideo.mp4
 
 
 # 🧠 Architecture Overview
