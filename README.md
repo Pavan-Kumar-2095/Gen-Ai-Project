@@ -13,7 +13,7 @@ It enables users to:
 ## 🎥 Demo Video
 
 
-https://raw.githubusercontent.com/Pavan-Kumar-2095/Gen-Ai-Project/main/DemoVideo/DemoVideo.mp4
+[https://raw.githubusercontent.com/Pavan-Kumar-2095/Gen-Ai-Project/main/DemoVideo/DemoVideo.mp4](https://github.com/Pavan-Kumar-2095/Gen-Ai-Project/issues/1#issue-4320976302)
 
 
 
