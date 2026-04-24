@@ -12,7 +12,9 @@ It enables users to:
 ## 🎥 Demo Video
 
 <video width="100%" controls>
-  <source src="https://github.com/Pavan-Kumar-2095/Gen-Ai-Project/blob/main/DemoVideo/DemoVideo.mp4" type="video/mp4">
+  <source src="<video width="100%" controls>
+  <source src="https://raw.githubusercontent.com/Pavan-Kumar-2095/Gen-Ai-Project/main/DemoVideo/DemoVideo.mp4" type="video/mp4">
+</video>" type="video/mp4">
 </video>
 
 # 🧠 Architecture Overview
