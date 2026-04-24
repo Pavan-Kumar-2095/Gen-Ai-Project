@@ -15,7 +15,6 @@ It enables users to:
   <source src="https://raw.githubusercontent.com/Pavan-Kumar-2095/Gen-Ai-Project/main/DemoVideo/DemoVideo.mp4" type="video/mp4">
 </video>
 
-```
 
 # 🧠 Architecture Overview
 
