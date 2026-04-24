@@ -14,7 +14,7 @@ It enables users to:
 
 
 https://raw.githubusercontent.com/Pavan-Kumar-2095/Gen-Ai-Project/main/DemoVideo/DemoVideo.mp4
-
+https://github.com/Pavan-Kumar-2095/Gen-Ai-Project/blob/main/DemoVideo/DemoVideo.mp4
 
 
 # 🧠 Architecture Overview
