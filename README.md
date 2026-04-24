@@ -12,8 +12,8 @@ It enables users to:
 
 ## 🎥 Demo Video
 
+https://github.com/user-attachments/assets/74d997e7-212f-4491-b834-d5a0c5b399b1
 
-[https://raw.githubusercontent.com/Pavan-Kumar-2095/Gen-Ai-Project/main/DemoVideo/DemoVideo.mp4](https://github.com/Pavan-Kumar-2095/Gen-Ai-Project/issues/1#issue-4320976302)
 
 
 
