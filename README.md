@@ -78,8 +78,9 @@ cd DocuQuery
 
 
 ## 2️⃣  Install Dependencies
+```
 pip install -r requirements.txt  
-
+```
 ---
 
 ## 3️⃣ Configure Environment Variables
@@ -93,8 +94,9 @@ PORT=8000
 ---
 
 ## 4️⃣ Run Backend Server
+```
 python Server.py  
-
+```
 Server runs at:
 http://localhost:8000  
 
