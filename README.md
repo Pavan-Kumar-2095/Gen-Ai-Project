@@ -70,8 +70,10 @@ requirements.txt   → Dependencies
 # ⚙️ Setup & Installation
 
 ## 1️⃣ Clone Repository
+```
 git clone https://github.com/Pavan-Kumar-2095/Gen-Ai-Project/
-cd DocuQuery  
+cd DocuQuery
+```
 
 
 
