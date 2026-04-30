@@ -157,8 +157,6 @@ Examples:
 
 ## 📈 LinkedIn Post
 
-https://www.linkedin.com/feed/update/urn:li:activity:7359036194195681280/
-
-
+LinkedIn Profile : [LinkedIn](https://www.linkedin.com/in/pavan-kumar-107655297/)
 ---
 
